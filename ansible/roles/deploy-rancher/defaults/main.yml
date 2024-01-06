@@ -1,0 +1,6 @@
+---
+http_rancher_port: "9090"
+localhost_address: "https://127.0.0.1"
+rancher_container_name: "rancher-server"
+new_admin_password: "rancher123456"
+k8sversion: "v1.27.8+rke2r1"

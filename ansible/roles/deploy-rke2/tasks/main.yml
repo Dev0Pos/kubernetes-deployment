@@ -1,0 +1,46 @@
+---
+- name: Wait for Rancher server to be reachable
+  wait_for:
+    host: "{{ rancher_server_ip.stdout }}"
+    port: "{{ https_rancher_port }}"
+    state: started
+    delay: 5
+    timeout: 300
+  retries: 12
+  register: ping_result
+  until: ping_result is succeeded
+
+- name: Test if cluster is created
+  uri:
+    url: "{{ rancher_server }}/v3/clusters?name={{ cluster_rke2_name }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ login_token }}"
+    validate_certs: no
+  register: cluster_response
+  retries: 12
+  delay: 5
+  until: cluster_response.json.data | length > 0
+
+- name: Get role flags from hostname
+  set_fact:
+    roleflag: "etcd --controlplane --worker"
+
+- name: Get token
+  uri:
+    url: "{{ rancher_server }}/v3/clusterregistrationtoken?clusterId={{ cluster_response.json.data[0].id }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ login_token }}"
+    validate_certs: no
+  register: token_response
+  retries: 12
+  delay: 5
+  until: token_response.json.data | length > 0
+
+- name: Combine command and flags
+  set_fact:
+    completecmd: "{{ token_response.json.data[0].insecureNodeCommand }} --{{ roleflag if roleflag != 'all' else 'etcd --controlplane --worker' }}"
+
+- name: Run command
+  shell: "{{ completecmd }}"

@@ -1,0 +1,8 @@
+---
+- hosts: orchestration_machine
+  vars_files:
+    - conf/vars.yml
+  become: yes
+  max_fail_percentage: 0
+  roles:
+    - { role: download-required-images, tags: [ "download-required-images" ] }

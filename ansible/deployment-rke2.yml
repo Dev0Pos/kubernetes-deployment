@@ -1,0 +1,10 @@
+---
+- hosts: orchestration_machine
+  vars_files:
+    - conf/vars.yml
+  vars:
+    rancher_server_ip: "{{ hostvars[groups['orchestration_machine'][0]]['rancher_server_ip'] }}"
+  become: yes
+  max_fail_percentage: 0
+  roles:
+    - { role: deploy-rke2, tags: [ "deploy-rke2" ] }

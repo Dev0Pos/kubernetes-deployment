@@ -1,0 +1,7 @@
+---
+rancher_version: "latest"
+curlimage: "appropriate/curl"
+jqimage: "stedolan/jq"
+
+https_rancher_port: "9443"
+cluster_rke2_name: "sandbox"
