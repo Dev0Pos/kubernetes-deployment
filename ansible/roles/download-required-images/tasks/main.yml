@@ -1,0 +1,26 @@
+---
+- name: Install Docker using curl
+  shell: >
+    curl -sL https://releases.rancher.com/install-docker/{{ docker_version_server }}.sh | sh
+  args:
+    executable: /bin/bash
+  when: "'curl' in ansible_play_hosts[0]"
+
+- name: Install Docker using wget
+  shell: >
+    wget -qO- https://releases.rancher.com/install-docker/{{ docker_version_server }}.sh | sh
+  args:
+    executable: /bin/bash
+  when: "'wget' in ansible_play_hosts[0]"
+
+- name: Pull required Docker images
+  shell: >
+    docker pull {{ item }}
+  with_items:
+    - "{{ curlimage }}"
+    - "{{ jqimage }}"
+    - "rancher/rancher:{{ rancher_version }}"
+  register: docker_pull_result
+  until: docker_pull_result.stdout_lines is search("Image is up to date for")
+  retries: 5
+  delay: 2

@@ -1,0 +1,151 @@
+---
+- name: Run Rancher server container
+  shell: >
+    docker run -d --privileged --restart=unless-stopped -p {{ http_rancher_port }}:80 -p {{ https_rancher_port }}:443 --name {{ rancher_container_name }} rancher/rancher:{{ rancher_version }}
+  args:
+    executable: /bin/bash
+
+- name: Check Rancher server availability
+  shell: >
+    docker run --rm --net=host {{ curlimage }} -sLk {{ localhost_address }}:{{ https_rancher_port }}/ping
+  register: ping_result
+  until: ping_result.rc == 0
+  retries: 10
+  delay: 10
+
+- name: Get admin password
+  shell: >
+    docker logs {{ rancher_container_name }} 2>&1 | grep "Bootstrap Password:" | awk '{ print $NF }'
+  register: admin_password
+  changed_when: false
+
+- name: Wait for capi-controller-manager to be ready
+  shell: >
+    docker exec {{ rancher_container_name }} kubectl rollout status -w -n cattle-provisioning-capi-system deploy/capi-controller-manager
+  register: rollout_status
+  until: rollout_status.rc == 0
+  retries: 50
+  delay: 5
+  changed_when: false
+
+- name: Wait for rancher-webhook to be ready
+  shell: >
+    docker exec {{ rancher_container_name }} kubectl rollout status -w -n cattle-system deploy/rancher-webhook
+  register: rollout_status
+  until: rollout_status.rc == 0
+  retries: 10
+  delay: 5
+  changed_when: false
+
+- name: Login
+  shell: |
+    docker run \
+    --rm \
+    --net=host \
+    {{ curlimage }} \
+    -s "{{ localhost_address }}:{{ https_rancher_port }}/v3-public/localProviders/local?action=login" \
+    -H 'content-type: application/json' \
+    --data-binary '{"username":"admin","password":"'{{ admin_password.stdout }}'"}' \
+    --insecure
+  register: login_response
+  until: login_response.stdout | from_json | json_query('token') is defined
+  retries: 10
+  delay: 5
+  changed_when: false
+
+- set_fact:
+    login_token: "{{ login_response.stdout | from_json | json_query('token') }}"
+
+- name: Change password
+  shell: |
+    docker run --rm --net=host {{ curlimage }} -s '{{ localhost_address }}:{{ https_rancher_port }}/v3/users?action=changepassword' -H 'content-type: application/json' -H "Authorization: Bearer {{ login_token }}" --data-binary '{"currentPassword":"{{ admin_password.stdout }}","newPassword":"{{ new_admin_password }}"}' --insecure
+  changed_when: false
+
+- name: Create API key
+  shell: |
+    while true; do
+    APIRESPONSE=$(docker run --rm --net=host {{ curlimage }} -s '{{ localhost_address }}:{{ https_rancher_port }}/v3/token' -H 'content-type: application/json' -H "Authorization: Bearer {{ login_token }}" --data-binary '{"type":"token","description":"automation"}' --insecure)
+    if [ "x$APIRESPONSE" = "x" ]; then
+        continue
+    fi
+
+    # Extract and store token
+    APITOKEN=$(echo $APIRESPONSE | docker run --rm -i {{ jqimage }} -r .token)
+
+    if [ "x$APITOKEN" != "x" ]; then
+        break
+    else
+        sleep 5
+    fi
+    done
+
+  register: login_response
+
+- name: "Get rancher IP address"
+  shell: "hostname -i | awk '{print $1}'"
+  register: rancher_server_ip
+
+- set_fact:
+    rancher_server: "https://{{ rancher_server_ip.stdout }}:{{ https_rancher_port }}"
+
+- name: Configure RANCHER_SERVER
+  shell: |
+    while true; do
+    docker run --rm --net=host {{ curlimage }} -s "{{ localhost_address }}:{{ https_rancher_port }}/v3/settings/server-url" -H 'content-type: application/json' -H "Authorization: Bearer {{ login_token }}" -X PUT --data-binary '{"name":"server-url","value":"{{ rancher_server }}" }' --insecure
+
+    # Reading it back
+    CURRENTSERVERURL=$(docker run --rm --net=host {{ curlimage }} -s "{{ localhost_address }}:{{ https_rancher_port }}/v3/settings/server-url" -H 'content-type: application/json' -H "Authorization: Bearer {{ login_token }}" --insecure | docker run --rm -i {{ jqimage }} -r .value)
+
+    if [ "x$CURRENTSERVERURL" != "x" ]; then
+        break
+    else
+        sleep 5
+    fi
+    done
+
+  register: configure_rancher_server_output
+
+- name: Get cluster response
+  shell:
+    cmd: >
+      docker run --rm --net=host {{ curlimage }} -s '{{ localhost_address }}:{{ https_rancher_port }}/v1/provisioning.cattle.io.clusters' -H 'content-type: application/json' -H "Authorization: Bearer {{ login_token }}" --data-binary '{"type":"provisioning.cattle.io.cluster","metadata":{"namespace":"fleet-default","name":"{{ cluster_rke2_name }}"},"spec":{"kubernetesVersion":"'"{{ k8sversion }}"'","rkeConfig":{"upgradeStrategy":{"controlPlaneConcurrency":"10%","controlPlaneDrainOptions":{},"workerConcurrency":"10%","workerDrainOptions":{}},"localClusterAuthEndpoint":{"enabled":false,"caCerts":"","fqdn":""},"machinePools":[]},"defaultPodSecurityPolicyTemplateName":null}}' --insecure
+  register: cluster_response
+
+- name: Get cluster ID
+  shell:
+    cmd: >
+      docker run --rm --net=host {{ curlimage }} -s '{{ localhost_address }}:{{ https_rancher_port }}/v3/clusters?name={{ cluster_rke2_name }}' -H 'content-type: application/json' -H "Authorization: Bearer {{ login_token }}" --insecure | docker run --rm -i {{ jqimage }} -r .data[].id
+  register: cluster_id
+
+- name: Generate RKE2 registration token
+  shell:
+    cmd: >
+      docker run --rm --net=host {{ curlimage }} -s '{{ localhost_address }}:{{ https_rancher_port }}/v3/clusterregistrationtoken' -H 'content-type: application/json' -H "Authorization: Bearer {{ login_token }}" --data-binary '{"type":"clusterRegistrationToken","clusterId":"'"{{ cluster_id.stdout }}"'"}' --insecure
+
+- name: Get cacerts to validate connection
+  shell:
+    cmd: >
+      docker run --rm --net=host {{ curlimage }} -s '{{ localhost_address }}:{{ https_rancher_port }}/v3/settings/cacerts' -H 'content-type: application/json' -H "Authorization: Bearer {{ login_token }}" --insecure
+  register: api_cacerts
+
+- name: Extract cacerts value
+  set_fact:
+    cacerts: "{{ api_cacerts.stdout | from_json | json_query('value') }}"
+
+- name: Save cacerts to file
+  copy:
+    content: "{{ cacerts }}"
+    dest: /root/cacerts
+
+- name: Accept anything for project
+  command:
+    cmd: >
+      echo 1 | rancher login --cacert /root/cacerts --token {{ login_token }} {{ localhost_address }}:{{ https_rancher_port }}/v3
+    creates: ~/.rancher
+
+- name: Create symbolic link
+  file:
+    src: /.rancher
+    dest: ~/.rancher
+    state: link
+    force: yes
